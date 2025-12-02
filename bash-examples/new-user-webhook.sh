@@ -6,12 +6,12 @@
 
 export PGHOST="localhost"
 export PGPORT="5432"
-export PGDATABASE="retro-game"
-export PGUSER="postgres"
-export PGPASSWORD=""
+export PGDATABASE="app_database"
+export PGUSER="db_user"
+export PGPASSWORD="your_password"
 
 # Set your Discord webhook URL here
-WEBHOOK_URL="https://discord.com/api/webhooks/1195858440015314976/JVL5I0fdrdI6s0rnksNxylI_SPY0bXxfYHc_257FH5thRY2kqV40X_5_jjjdNlZq8cG1"
+WEBHOOK_URL="https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
 
 #Set Last Known User
 last_user=""
@@ -19,8 +19,8 @@ last_user=""
 # Loop through for new players:
 while true; do
 	# Collect the most recent user information
-	id=$(psql -d retro-game -U postgres -t -c "select id from users order by id desc limit 1;")
-	name=$(psql -d retro-game -U postgres -t -c "select name from users order by id desc limit 1;")
+	id=$(psql -d app_database -U db_user -t -c "select id from users order by id desc limit 1;")
+	name=$(psql -d app_database -U db_user -t -c "select name from users order by id desc limit 1;")
 	
 	# Determine if this is the most recent user
 	if [[ $id > $last_user ]]; then

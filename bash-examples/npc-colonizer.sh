@@ -2,15 +2,15 @@
 ###################################################################################################
 # The purpose of this script is to generate attackable colonies belonging to envoys.
 
-a_user_id=$(psql -d retro-game -U postgres -t -c "select id from users where email = 'envoys@glassow.com';"); 
-echo "[INFO] Envoy User ID is: $a_user_id"
-a_hw_id=$(psql -d retro-game -U postgres -t -c "select id from bodies where user_id = $a_user_id order by id asc limit 1;") 
+a_user_id=$(psql -d app_database -U db_user -t -c "select id from users where email = 'npc@example.com';"); 
+echo "[INFO] NPC User ID is: $a_user_id"
+a_hw_id=$(psql -d app_database -U db_user -t -c "select id from bodies where user_id = $a_user_id order by id asc limit 1;") 
 echo "[INFO] Envoy HW ID is: $a_hw_id"
 
 #loop until stopped
 while true; do
 	# Grab the number of planets
-  	p_planets=$(psql -d retro-game -U postgres -t -c "select count(*) from bodies where user_id > 8;"); 
+  	p_planets=$(psql -d app_database -U db_user -t -c "select count(*) from bodies where user_id > 8;"); 
   	echo "[INFO] Grabbing Planets: $p_planets"
   
   	# Calculate a 10 day doomsday based on Player Planet Count
@@ -22,12 +22,12 @@ while true; do
     		echo "[INFO] The Count is now: $w_count"
     		sleep 2
     		# grab a random player's location
-    		r_planet=$(psql -d retro-game -U postgres -t -c "SELECT id FROM bodies where kind = 0 and user_id > 8 ORDER BY RANDOM() LIMIT 1;");   
+    		r_planet=$(psql -d app_database -U db_user -t -c "SELECT id FROM bodies where kind = 0 and user_id > 8 ORDER BY RANDOM() LIMIT 1;");   
     		echo "[INFO] Grabbing Target Player Planet: $r_planet"
 
-    		p_galaxy=1 #$(psql -d retro-game -U postgres -t -c "SELECT galaxy FROM bodies where id = $r_planet;")
-    		p_system=$(psql -d retro-game -U postgres -t -c "SELECT system FROM bodies where id = $r_planet;")
-    		p_position=$(psql -d retro-game -U postgres -t -c "SELECT position FROM bodies where id = $r_planet;"); 
+    		p_galaxy=1 #$(psql -d app_database -U db_user -t -c "SELECT galaxy FROM bodies where id = $r_planet;")
+    		p_system=$(psql -d app_database -U db_user -t -c "SELECT system FROM bodies where id = $r_planet;")
+    		p_position=$(psql -d app_database -U db_user -t -c "SELECT position FROM bodies where id = $r_planet;"); 
     		echo "[INFO] Grabbing Target Player Planet Coords: $p_galaxy : $p_system : $p_position"
 
     		# pick a spot near it
@@ -54,8 +54,8 @@ while true; do
     		fi
     		echo "[INFO] Envoy System: $a_system"
 
-    		# Check if envoy position is open
-    		count=$(psql -d retro-game -U postgres -t -c "select count(*) from bodies where galaxy = $p_galaxy and system = $a_system and position = $p_position;"); echo "[INFO] False/True if there is a planet there: $count"
+    		# Check if position is open
+    		count=$(psql -d app_database -U db_user -t -c "select count(*) from bodies where galaxy = $p_galaxy and system = $a_system and position = $p_position;"); echo "[INFO] False/True if there is a planet there: $count"
     		
 		# if occupied, restart loop
     		if [ $count -gt 0 ]; then
@@ -64,8 +64,8 @@ while true; do
     		fi
     
 		# grab top players fleet & defense scores
-    		t_ships_raw=$(psql -d retro-game -U postgres -t -c "SELECT ROUND(AVG(points)) as average_points FROM (SELECT points FROM fleet_statistics WHERE user_id > 8 ORDER BY at DESC, points DESC LIMIT 5) AS top_5_points;")
-    		t_defense_raw=$(psql -d retro-game -U postgres -t -c "SELECT ROUND(AVG(points)) as average_points FROM (SELECT points FROM defense_statistics WHERE user_id > 8 ORDER BY at DESC, points DESC LIMIT 5) AS top_5_points;")
+    		t_ships_raw=$(psql -d app_database -U db_user -t -c "SELECT ROUND(AVG(points)) as average_points FROM (SELECT points FROM fleet_statistics WHERE user_id > 8 ORDER BY at DESC, points DESC LIMIT 5) AS top_5_points;")
+    		t_defense_raw=$(psql -d app_database -U db_user -t -c "SELECT ROUND(AVG(points)) as average_points FROM (SELECT points FROM defense_statistics WHERE user_id > 8 ORDER BY at DESC, points DESC LIMIT 5) AS top_5_points;")
     		t_fleet_raw=$((t_ships_raw + t_defense_raw)); 
     		echo "[INFO] Grabbing Fleet Score:$t_fleet_raw. Then Dividing..."
     		
@@ -119,21 +119,21 @@ while true; do
 
     	# populate a planet
     		query="insert into bodies (user_id, galaxy, system, position, kind, name, created_at, updated_at, diameter, temperature, type, image, metal, crystal, deuterium, metal_mine_factor, crystal_mine_factor, deuterium_synthesizer_factor, solar_plant_factor, fusion_reactor_factor, solar_satellites_factor, last_jump_at, buildings, units, building_queue, shipyard_queue) values ($a_user_id, $p_galaxy, $a_system, $p_position, 0, '$random_planet', NOW(), NOW(), 10000, 0, 0, 1, $metal, $crystal, $deut, 10, 10, 10, 10, 10, 10, NOW(), '{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}', '{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}', '{}', '{}');"
-    		psql -d retro-game -U postgres -t -c "$query" || break
+    		psql -d app_database -U db_user -t -c "$query" || break
 			query="update bodies set units[1] = $sc where user_id = $a_user_id and galaxy = $p_galaxy and system = $a_system and position = $p_position;"
-			psql -d retro-game -U postgres -t -c "$query" || break
+			psql -d app_database -U db_user -t -c "$query" || break
 			query="update bodies set units[2] = $lc where user_id = $a_user_id and galaxy = $p_galaxy and system = $a_system and position = $p_position;"
-			psql -d retro-game -U postgres -t -c "$query" || break
+			psql -d app_database -U db_user -t -c "$query" || break
 			query="update bodies set units[3] = $lf where user_id = $a_user_id and galaxy = $p_galaxy and system = $a_system and position = $p_position;"
-			psql -d retro-game -U postgres -t -c "$query" || break
+			psql -d app_database -U db_user -t -c "$query" || break
 			query="update bodies set units[4] = $hf where user_id = $a_user_id and galaxy = $p_galaxy and system = $a_system and position = $p_position;"
-			psql -d retro-game -U postgres -t -c "$query" || break
+			psql -d app_database -U db_user -t -c "$query" || break
 			query="update bodies set units[7] = $cs where user_id = $a_user_id and galaxy = $p_galaxy and system = $a_system and position = $p_position;"
-			psql -d retro-game -U postgres -t -c "$query" || break
+			psql -d app_database -U db_user -t -c "$query" || break
     	
 		# Get Planet ID
     		sleep 1
-    		b_id=$(psql -d retro-game -U postgres -t -c "select id from bodies where user_id = 4 order by created_at desc limit 1;"); echo "[INFO] Planet ID: $b_id"
+    		b_id=$(psql -d app_database -U db_user -t -c "select id from bodies where user_id = 4 order by created_at desc limit 1;"); echo "[INFO] Planet ID: $b_id"
 	done
 	echo "[INFO] Sleeping $c_timer..."
 	sleep $c_timer
