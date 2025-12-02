@@ -1,0 +1,148 @@
+#version: '3.8'
+
+services:
+  # MariaDB Service
+  mwarfare-dev-db:
+    image: mariadb:11.3.2-jammy
+    container_name: mw-dev-db
+    restart: unless-stopped
+    tty: true
+    volumes:
+     - mwarfare-dev-dbdata:/var/lib/mysql
+     - ./mysql/my.cnf:/etc/mysql/my.cnf
+    # MariaDB port is not exposed to the host machine in production.
+    environment:
+      MYSQL_DATABASE: laravel
+      MYSQL_ROOT_PASSWORD: toor
+      SERVICE_TAGS: dev
+      SERVICE_NAME: mysql
+    networks:
+      app-network:
+        aliases:
+          - mwarfare-dev-db
+
+  # PHP Service
+  mw-dev-app:
+    volumes:
+      - ./:/var/www:cached
+      - ./php/local.ini:/usr/local/etc/php/conf.d/local.ini
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        OPCACHE_ENABLE: "0" # Enable opcache in production
+    container_name: mw-dev-app
+    restart: unless-stopped
+    tty: true
+    environment:
+      CONTAINER_ROLE: app
+      SERVICE_NAME: app
+      SERVICE_TAGS: dev
+    working_dir: /var/www
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000 || [ $? -eq 56 ]"]
+      interval: 10s
+      timeout: 6s
+      retries: 60
+    networks:
+      - app-network
+    depends_on:
+      - mwarfare-dev-db
+
+  # Nginx Service
+  mw-dev-web:
+    image: nginx:alpine
+    container_name: mw-dev-web
+    restart: unless-stopped
+    tty: true
+    volumes:
+      - ./:/var/www:cached
+      - ./nginx/conf.d/:/etc/nginx/conf.d/
+      - ./nginx/ssl/:/etc/nginx/ssl/
+    ports:
+      - "8081:80"
+    networks:
+      - app-network
+    depends_on:
+      mw-dev-app:
+        condition: service_healthy
+
+  # Scheduler
+  mw-dev-sched:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mw-dev-sched
+    volumes:
+      - .:/var/www
+    environment:
+      CONTAINER_ROLE: scheduler
+    networks:
+      - app-network
+    depends_on:
+      mw-dev-app:
+        condition: service_healthy
+
+  # PhpMyAdmin
+  mw-dev-phpmyadmin:
+    image: phpmyadmin
+    container_name: mw-dev-phpmyadmin
+    restart: always
+    ports:
+      - "8082:80"
+    environment:
+      - PMA_ARBITRARY=1
+      - PMA_HOST=ogame-db
+      - UPLOAD_LIMIT=1G
+    networks:
+      - app-network
+    volumes:
+      - ./docker/phpmyadmin/.htaccess:/var/www/html/.htaccess
+
+  # Redis
+  redis:
+    image: redis:alpine
+    container_name: mw-dev-redis
+    ports:
+    - "6377:6379"
+    networks:
+    - app-network
+
+  queue:
+    container_name: mw-dev-queue
+    build: .
+    working_dir: /var/www
+    volumes:
+    - .:/var/www
+    command: php artisan horizon
+    depends_on:
+    - mw-dev-app
+    - mwarfare-dev-db
+    - redis
+    networks:
+    - app-network
+
+  # Reverb Service
+  reverb:
+    container_name: mw-dev-reverb
+    build: .
+    working_dir: /var/www
+    volumes:
+      - .:/var/www
+    command: php artisan reverb:start --port=9090 --debug
+    ports:
+      - "9091:9090"
+    depends_on:
+      - mw-dev-app
+    networks:
+      - app-network
+
+# Docker Networks
+networks:
+  app-network:
+    driver: bridge
+
+# Volumes
+volumes:
+  mwarfare-dev-dbdata:
+    driver: local

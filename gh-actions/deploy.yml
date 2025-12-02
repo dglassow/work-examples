@@ -1,0 +1,283 @@
+name: Build, Push & Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to deploy'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+        - both
+        - app
+        - scheduler
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - production
+  pull_request:
+    types: [closed]
+    branches: [main]
+  push:
+    branches: [main]
+
+# Prevent concurrent deployments to the same environment
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  ECR_REGISTRY_PREFIX: myapp
+
+jobs:
+  build_and_push_app:
+    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Required for OIDC authentication
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      app_digest: ${{ steps.build_app.outputs.digest }}
+      scheduler_digest: ${{ steps.build_scheduler.outputs.digest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history for better caching
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          VERSION="${SHORT_SHA}-${TIMESTAMP}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT       
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Create .env file
+        run: echo "${{ secrets.ENVFILE }}" > .env
+
+      - name: Build and push App image
+        id: build_app
+        if: github.event.inputs.service == 'both' || github.event.inputs.service == 'app' || github.event_name != 'workflow_dispatch'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/app:latest
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/app:${{ steps.meta.outputs.version }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/app:${{ steps.meta.outputs.short_sha }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          provenance: false
+
+      - name: Build and push Scheduler image
+        id: build_scheduler
+        if: github.event.inputs.service == 'both' || github.event.inputs.service == 'scheduler' || github.event_name != 'workflow_dispatch'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile_scheduler
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/scheduler:latest
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/scheduler:${{ steps.meta.outputs.version }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/scheduler:${{ steps.meta.outputs.short_sha }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          provenance: false
+
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Run security scan on App image
+        if: steps.build_app.outcome == 'success'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/app:${{ steps.meta.outputs.version }}
+          format: 'sarif'
+          output: 'trivy-app-results.sarif'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+
+      - name: Upload Trivy scan results
+        if: steps.build_app.outcome == 'success'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-app-results.sarif'
+        continue-on-error: true
+
+  deploy:
+    needs: [build_and_push_app]
+    if: github.base_ref == 'main' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    environment: 
+      name: ${{ github.event.inputs.environment || 'dev' }}
+      url: https://${{ github.event.inputs.environment || 'dev' }}.example.com
+    strategy:
+      max-parallel: 1 # Deploy services sequentially
+      matrix:
+        service: 
+          - { name: "app", display: "Application", container: "app-dev-app" }
+          - { name: "scheduler", display: "Scheduler", container: "app-dev-scheduler" }
+    steps:
+      - name: Set deployment start time
+        id: deploy_start
+        run: echo "start_time=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Deploy ${{ matrix.service.display }}
+        id: deploy
+        if: |
+          github.event.inputs.service == 'both' || 
+          github.event.inputs.service == matrix.service.name ||
+          github.event_name != 'workflow_dispatch'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.KEY }}
+          command_timeout: 10m
+          script: |
+            set -e
+            
+            echo "Starting deployment: ${{ matrix.service.display }}"
+            
+            # Configuration
+            APP_DIR="/opt/application"
+            LOG_DIR="/var/log/deployments"
+            BACKUP_DIR="/opt/backups"
+            IMAGE_TAG="${{ needs.build_and_push_app.outputs.image_tag }}"
+            
+            # Create directories
+            sudo mkdir -p "$LOG_DIR" "$BACKUP_DIR"
+            
+            # Navigate to application directory
+            cd "$APP_DIR"
+            
+            # Configure git safe directory
+            git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
+            
+            # Backup current state
+            echo "Creating backup..."
+            BACKUP_FILE="$BACKUP_DIR/${{ matrix.service.name }}-$(date +%Y%m%d-%H%M%S).tar.gz"
+            tar -czf "$BACKUP_FILE" -C "$APP_DIR" . 2>/dev/null || echo "Warning: Backup skipped"
+            
+            # Update repository
+            echo "Updating repository..."
+            git fetch origin
+            git reset --hard origin/main
+            
+            # Pull new image
+            echo "Pulling Docker image: ${IMAGE_TAG}"
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+              docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+            
+            # Deploy using deployment script
+            echo "Executing deployment..."
+            ./deploy.sh ${{ matrix.service.name }} "${IMAGE_TAG}"
+            
+            # Health check
+            echo "Running health check..."
+            sleep 5
+            if docker ps | grep -q "${{ matrix.service.container }}"; then
+              echo "Container is running"
+              
+              # Additional health check for app service
+              if [ "${{ matrix.service.name }}" = "app" ]; then
+                for i in {1..30}; do
+                  if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+                    echo "Health check passed"
+                    break
+                  fi
+                  if [ $i -eq 30 ]; then
+                    echo "Error: Health check failed"
+                    exit 1
+                  fi
+                  sleep 2
+                done
+              fi
+            else
+              echo "Error: Container failed to start"
+              exit 1
+            fi
+            
+            # Log deployment
+            echo "$(date '+%Y-%m-%d %H:%M:%S') | ${{ matrix.service.display }} | ${IMAGE_TAG} | ${{ github.actor }} | SUCCESS" >> "$LOG_DIR/deployments.log"
+            
+            echo "Deployment completed successfully"
+
+      - name: Calculate deployment duration
+        if: always()
+        run: |
+          START_TIME=${{ steps.deploy_start.outputs.start_time }}
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "Deployment duration: ${DURATION}s"
+          echo "duration=${DURATION}" >> $GITHUB_OUTPUT
+
+      - name: Rollback on failure
+        if: failure() && steps.deploy.outcome == 'failure'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.KEY }}
+          script: |
+            echo "Rolling back ${{ matrix.service.display }}"
+            cd /opt/application
+            ./rollback.sh ${{ matrix.service.name }}
+            echo "Rollback completed"
+
+  notify:
+    needs: [build_and_push_app, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send deployment notification
+        if: always()
+        run: |
+          STATUS="${{ needs.deploy.result }}"
+          if [ "$STATUS" = "success" ]; then
+            COLOR="good"
+          else
+            COLOR="danger"
+          fi
+          
+          echo "Deployment $STATUS"
+          # Add Slack/Discord/Email notification here
+          # curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} -d '{"text":"Deployment '"$STATUS"'","color":"'"$COLOR"'"}' -H 'Content-Type: application/json'
